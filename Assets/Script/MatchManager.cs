@@ -23,7 +23,6 @@ namespace Match3
 
 		public bool dragMode;      
 		public bool swapBack;
-		public bool diagonalMatches;
 		public float dragThreshold = 1.2f;
 
 		public int rows, columns;
@@ -37,7 +36,7 @@ namespace Match3
 		private MatchPiece[][] board;
 	    private GameObject matchPieceObject;
         private MatchPiece currentPiece;
-		private SwapDirection currentDirection;
+		private SwipeDirection currentDirection;
 
 		public void Start()
 		{
@@ -90,6 +89,209 @@ namespace Match3
 			}
 		}
 
+		public void SwapPieces(MatchPiece piece, SwipeDirection direction, bool checkMatches = true)
+		{
+			currentPiece = piece;
+			currentDirection = direction;
 
+			bool validMove = CheckForValidMove(piece, direction);
+
+			if (!validMove)
+			{
+				if (!dragMode)
+					piece.gameObject.transform.DOShakePosition(0.5f, 0.3f);
+				return;
+			}
+
+			canMove = false;
+
+			MatchPiece otherPiece = GetPieceByDirection(piece, direction);
+
+			var piecePosition = piece.transform.position;
+			var otherPiecePosition = otherPiece.transform.position;
+
+			piece.ChangeSortingLayer("ballFront");
+			otherPiece.ChangeSortingLayer("ballBack");
+
+			DOTween.Sequence()
+				   .Append(piece.transform.DOMove(otherPiecePosition, timeToSwap))
+				   .Join(otherPiece.transform.DOMove(piecePosition, timeToSwap))
+				   .SetEase(Ease.OutCirc)
+				   .OnComplete(() =>
+				   {
+					   SwapPieces(piece, otherPiece, checkMatches);
+				   });
+		}
+
+		private void SwapPieces(MatchPiece piece, MatchPiece otherPiece, bool checkMatches = true)
+		{
+			var pieceRow = piece.row;
+			var pieceColumn = piece.column;
+
+			piece.row = otherPiece.row;
+			piece.column = otherPiece.column;
+
+			otherPiece.row = pieceRow;
+			otherPiece.column = pieceColumn;
+
+			board[piece.column][piece.row] = piece;
+			board[otherPiece.column][otherPiece.row] = otherPiece;
+
+			canMove = true;
+
+			if (needCheckMatches || !dragMode && checkMatches)
+			{
+				needCheckMatches = false;
+				StartCoroutine(CheckForMatches());
+			}
+		}
+
+		public IEnumerator CheckForMatches(bool needSwapBack = true)
+		{
+			bool hasMatches = false;
+
+			if (gameIsOver) yield break;
+
+			for (int x = 0; x < rows; x++)
+			{
+				for (int y = 0; y < columns; y++)
+				{
+					var horizontal = CheckMatches(x, y, MatchesType.HORIZONTAL);
+					var vertical = CheckMatches(x, y, MatchesType.VERTICAL);
+					if (!hasMatches)
+						hasMatches = horizontal || vertical;
+				}
+			}
+
+			if (!hasMatches && swapBack && !dragMode && needSwapBack)
+			{
+				SwapPieces(currentPiece, OppositeDirection(currentDirection), false);
+				canMove = true;
+			}
+
+			yield return new WaitForSeconds(TIME_TO_EXPLODE);
+
+			if (hasMatches)
+				StartCoroutine(ShiftDownPieces());
+		}
+
+		private bool CheckMatches(int x, int y, MatchesType type)
+		{
+			var addX = (type == MatchesType.DIAGONAL_LEFT ? -1 : type == MatchesType.VERTICAL ? 0 : 1);
+			var addY = (type == MatchesType.HORIZONTAL ? 0 : 1);
+			var pX = x + addX;
+			var pY = y + addY;
+			var hasMatches = false;
+
+			List<MatchPiece> pieceList = new List<MatchPiece>(){
+					board[x][y]
+				};
+			var currentType = board[x][y].type;
+
+			while (InBounds(pX, pY)
+						   && currentType.CompareTo(board[pX][pY].type) == 0
+						   && !board[pX][pY].HasMatch(type))
+			{
+				pieceList.Add(board[pX][pY]);
+				pX = pX + addX;
+				pY = pY + addY;
+			}
+
+			if (pieceList.Count > 2)
+			{
+				pieceList.ForEach(p => p.SetMatch(type));
+				ExplodePieces(pieceList);
+				hasMatches = true;
+			}
+
+			return hasMatches;
+		}
+
+		private IEnumerator ShiftDownPieces()
+		{
+			float offset = matchPieceObject.GetComponent<SpriteRenderer>().bounds.size.y;
+			for (int x = 0; x < rows; x++)
+			{
+				int shifts = 0;
+				for (int y = 0; y < columns; y++)
+				{
+					if (!board[x][y].inUse)
+					{
+						shifts++;
+						continue;
+					}
+
+					if (shifts == 0) continue;
+
+					board[x][y].transform.DOMoveY(board[x][y].transform.position.y - (offset * shifts), TIME_TO_EXPLODE)
+						 .SetEase(Ease.InExpo);
+					var holder = board[x][y - shifts];
+
+					board[x][y - shifts] = board[x][y];
+					board[x][y - shifts].row = y - shifts;
+
+					board[x][y] = holder;
+					board[x][y].transform.position = board[x][y - shifts].transform.position;
+				}
+			}
+
+			yield return new WaitForSeconds(TIME_TO_EXPLODE);
+
+			for (int x = 0; x < rows; x++)
+			{
+				for (int y = 0; y < columns; y++)
+				{
+					if (board[x][y].inUse) continue;
+					board[x][y].SetupPiece(y, x, pieceTypes[Random.Range(0, pieceTypes.Count)], TIME_TO_EXPLODE);
+				}
+			}
+
+			yield return new WaitForSeconds(TIME_TO_EXPLODE);
+
+			StartCoroutine(CheckForMatches(false));
+		}
+
+		private void ExplodePieces(List<MatchPiece> pieceList)
+		{
+			pieceList.ForEach(x => x.Explode(TIME_TO_EXPLODE));
+		}
+
+		private bool InBounds(int x, int y)
+		{
+			return x >= 0 && x < columns && y >= 0 && y < rows;
+		}
+
+		private MatchPiece GetPieceByDirection(MatchPiece piece, SwipeDirection direction)
+		{
+			var c = piece.column + (direction == SwipeDirection.LEFT ? (-1) : direction == SwipeDirection.RIGHT ? 1 : 0);
+			var r = piece.row + (direction == SwipeDirection.DOWN ? (-1) : direction == SwipeDirection.UP ? 1 : 0);
+
+			return board[c][r];
+		}
+
+		private bool CheckForValidMove(MatchPiece piece, SwipeDirection direction)
+		{
+			return !(direction == SwipeDirection.LEFT && piece.column == 0 ||
+					 direction == SwipeDirection.RIGHT && piece.column == columns - 1 ||
+					 direction == SwipeDirection.UP && piece.row == rows - 1 ||
+					 direction == SwipeDirection.DOWN && piece.row == 0);
+		}
+
+		private SwipeDirection OppositeDirection(SwipeDirection dir)
+		{
+			switch (dir)
+			{
+				case SwipeDirection.DOWN:
+					return SwipeDirection.UP;
+				case SwipeDirection.UP:
+					return SwipeDirection.DOWN;
+				case SwipeDirection.LEFT:
+					return SwipeDirection.RIGHT;
+				case SwipeDirection.RIGHT:
+					return SwipeDirection.LEFT;
+			}
+
+			return SwipeDirection.NULL;
+		}
 	}
 }
